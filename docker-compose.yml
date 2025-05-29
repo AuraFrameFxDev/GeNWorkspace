@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: genesis-backend
+    restart: unless-stopped
+    user: "${UID}:${GID}"
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ENVIRONMENT=development
+      - PYTHONPATH=/app
+    volumes:
+      - ../:/app
+    working_dir: /app
+    command: sh -c "chown -R appuser:appuser /app && cd /app && uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload"
+    mem_limit: 2g # Add this line
+
+  # db: # ... (rest of your file)
+  # db: # ... (rest of your file)
+  # Uncomment to add PostgreSQL database
+  # db:
+  #   image: postgres:15
+  #   container_name: genesis-db
+  #   restart: unless-stopped
+  #   environment:
+  #     - POSTGRES_USER=genesis
+  #     - POSTGRES_PASSWORD=your_secure_password
+  #     - POSTGRES_DB=genesis_db
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data/
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U genesis"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 5
+
+# volumes:
+#   postgres_data:

@@ -1,0 +1,17 @@
+<resources>
+    <!-- 80s Retro Terminal Colors -->
+    <color name="terminal_bg">#121212</color>
+    <color name="terminal_fg">#00FF9F</color> <!-- Bright teal -->
+    <color name="terminal_accent">#9D00FF</color> <!-- Bright purple -->
+    <color name="terminal_highlight">#00E5FF</color> <!-- Cyan highlight -->
+
+    <!-- Theme colors -->
+    <color name="background">@color/terminal_bg</color>
+    <color name="surface">#1E1E1E</color>
+    <color name="on_primary">#000000</color>
+    <color name="on_surface">#CCCCCC</color>
+
+    <!-- Basic colors -->
+    <color name="black">#000000</color>
+    <color name="white">#FFFFFF</color>
+</resources>

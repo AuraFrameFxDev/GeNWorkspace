@@ -1,0 +1,307 @@
+import os
+import uuid
+import json
+from datetime import datetime
+from typing import List, Optional, Dict, Any
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel, Field
+import firebase_admin
+from firebase_admin import credentials, firestore, auth, storage
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration
+SERVICE_ACCOUNT_KEY_PATH = os.path.join(os.path.dirname(__file__), "credentials", "auraframefx-firebase-adminsdk-fbsvc-9c493ac034.json")
+
+# Initialize Firebase Admin SDK
+try:
+    cred = credentials.Certificate(SERVICE_ACCOUNT_KEY_PATH)
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://auraframefx.firebaseio.com',
+        'storageBucket': 'auraframefx.appspot.com'
+    })
+    db = firestore.client()
+    bucket = storage.bucket()
+    print("Firebase Admin SDK initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing Firebase Admin SDK: {e}")
+    raise
+
+# Request/Response Models
+class MessageRequest(BaseModel):
+    message: str
+
+class MessageResponse(BaseModel):
+    message: str
+    status: str = "success"
+
+class ImportResponse(BaseModel):
+    status: str = "success"
+
+class RootToggleRequest(BaseModel):
+    enabled: bool
+
+class RootToggleResponse(BaseModel):
+    status: str = "success"
+
+class AskResponse(BaseModel):
+    questions: List[str] = Field(default_factory=list)
+    status: str = "success"
+
+class Task(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = None
+    is_completed: bool = False
+    created_at: int = Field(default_factory=lambda: int(datetime.utcnow().timestamp() * 1000))
+    updated_at: int = Field(default_factory=lambda: int(datetime.utcnow().timestamp() * 1000))
+    is_deleted: bool = False
+
+class SyncRequest(BaseModel):
+    user_id: str
+    last_sync_time: Optional[int] = None
+    tasks: List[Task] = Field(default_factory=list)
+
+class SyncResponse(BaseModel):
+    status: str = "success"
+    message: str = ""
+    synced_tasks: List[Task] = Field(default_factory=list)
+    server_time: int = Field(default_factory=lambda: int(datetime.utcnow().timestamp() * 1000))
+
+# Initialize FastAPI
+app = FastAPI(title="Genesis AI Backend", version="1.0.0")
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if os.getenv("ENV") == "development" else ["https://your-domain.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Dependency to verify Firebase token
+async def get_current_user(authorization: str = Header(...)):
+    try:
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token = authorization.split(" ")[1]
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token
+    except Exception as e:
+        logger.error(f"Authentication error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+# Health Check Endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+# Message Endpoints
+@app.post("/sendMessage", response_model=MessageResponse, tags=["Messages"])
+async def send_message(request: MessageRequest, user=Depends(get_current_user)):
+    """Send a new message"""
+    try:
+        message_id = str(uuid.uuid4())
+        message_data = {
+            "message": request.message,
+            "userId": user["uid"],
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "status": "delivered"
+        }
+
+        # Save to Firestore
+        doc_ref = db.collection("messages").document(message_id)
+        doc_ref.set(message_data)
+
+        return MessageResponse(message="Message sent successfully")
+    except Exception as e:
+        logger.error(f"Error sending message: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
+
+# File Endpoints
+@app.post("/importFile", response_model=ImportResponse, tags=["Files"])
+async def import_file(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Import a file and store it in Firebase Storage"""
+    try:
+        if not file:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        # Generate a unique filename
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+
+        # Upload file to Firebase Storage
+        blob = bucket.blob(f"user_uploads/{user['uid']}/{unique_filename}")
+        file_content = await file.read()
+        blob.upload_from_string(
+            file_content,
+            content_type=file.content_type
+        )
+
+        # Make the file publicly accessible (or implement proper access control)
+        blob.make_public()
+
+        # Save file metadata to Firestore
+        file_data = {
+            "id": unique_filename,
+            "name": file.filename,
+            "url": blob.public_url,
+            "size": len(file_content),
+            "contentType": file.content_type,
+            "userId": user['uid'],
+            "uploadedAt": firestore.SERVER_TIMESTAMP
+        }
+
+        db.collection("files").document(unique_filename).set(file_data)
+
+        return ImportResponse(status="success")
+    except Exception as e:
+        logger.error(f"Error importing file: {str(e)}")
+        return ImportResponse(status="error")
+
+# Root Toggle Endpoint
+@app.post("/toggleRoot", response_model=RootToggleResponse, tags=["Admin"])
+async def toggle_root(request: RootToggleRequest, user=Depends(get_current_user)):
+    """Toggle root access for the application"""
+    try:
+        # Verify user has admin privileges
+        user_doc = db.collection("users").document(user["uid"]).get()
+        if not user_doc.exists or not user_doc.to_dict().get("isAdmin", False):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+        # Update root status in Firestore
+        db.collection("settings").document("root").set({
+            "enabled": request.enabled,
+            "updatedBy": user["uid"],
+            "updatedAt": firestore.SERVER_TIMESTAMP
+        }, merge=True)
+
+        return RootToggleResponse(status="success")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling root access: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to toggle root access: {str(e)}")
+
+# AI Questions Endpoint
+@app.get("/getAiQuestions", response_model=AskResponse, tags=["AI"])
+async def get_ai_questions(user=Depends(get_current_user)):
+    """Get a list of suggested AI questions"""
+    try:
+        # This is a simple example - you might want to customize this based on your needs
+        questions = [
+            "What can you help me with?",
+            "How do I use this app?",
+            "What are some common tasks?",
+            "How do I get started?",
+            "What features are available?"
+        ]
+
+        return AskResponse(questions=questions)
+    except Exception as e:
+        logger.error(f"Error getting AI questions: {str(e)}")
+        return AskResponse(questions=[], status="error")
+
+# Sync Tasks Endpoint
+@app.post("/syncTasks", response_model=SyncResponse, tags=["Tasks"])
+async def sync_tasks(request: SyncRequest, user=Depends(get_current_user)):
+    """Synchronize tasks between client and server"""
+    try:
+        # Verify the user making the request
+        if request.user_id != user["uid"]:
+            raise HTTPException(status_code=403, detail="User ID mismatch")
+
+        # Get the last sync time from the request
+        last_sync = request.last_sync_time or 0
+
+        # Get tasks that have been updated since the last sync
+        tasks_ref = db.collection("tasks").where("user_id", "==", user["uid"])
+        if last_sync > 0:
+            tasks_ref = tasks_ref.where("updated_at", ">", last_sync)
+
+        updated_tasks = []
+        for doc in tasks_ref.stream():
+            task_data = doc.to_dict()
+            task_data["id"] = doc.id
+            updated_tasks.append(task_data)
+
+        # Process any tasks sent from the client
+        for task in request.tasks:
+            task_data = task.dict()
+            task_data["updated_at"] = int(datetime.utcnow().timestamp() * 1000)
+
+            if task.id.startswith("local_"):
+                # New task - create in Firestore
+                task_ref = db.collection("tasks").document()
+                task_data["user_id"] = user["uid"]
+                task_data["created_at"] = task_data["updated_at"]
+                task_ref.set(task_data)
+                task_data["id"] = task_ref.id
+            else:
+                # Existing task - update in Firestore
+                task_ref = db.collection("tasks").document(task.id)
+                existing_task = task_ref.get()
+
+                if not existing_task.exists:
+                    continue
+
+                if existing_task.to_dict()["user_id"] != user["uid"]:
+                    continue
+
+                task_ref.update(task_data)
+
+            updated_tasks.append(task_data)
+
+        return SyncResponse(
+            status="success",
+            message="Tasks synchronized successfully",
+            synced_tasks=updated_tasks,
+            server_time=int(datetime.utcnow().timestamp() * 1000)
+        )
+    except Exception as e:
+        logger.error(f"Error syncing tasks: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to sync tasks: {str(e)}")
+
+# Root Endpoint
+@app.get("/")
+async def read_root():
+    return {
+        "status": "success",
+        "message": "Genesis AI Backend is running!",
+        "version": "1.0.0",
+        "endpoints": [
+            {"path": "/sendMessage", "method": "POST", "description": "Send a new message"},
+            {"path": "/importFile", "method": "POST", "description": "Import a file"},
+            {"path": "/toggleRoot", "method": "POST", "description": "Toggle root access"},
+            {"path": "/getAiQuestions", "method": "GET", "description": "Get AI questions"},
+            {"path": "/syncTasks", "method": "POST", "description": "Synchronize tasks"}
+        ]
+    }
+
+# Error Handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "message": str(exc.detail)},
+    )
+
+# Server Startup
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)

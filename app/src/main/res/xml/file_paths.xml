@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <paths>
+        <external-files-path
+            name="my_app_documents"
+            path="Documents/" />
+        <external-path
+            name="downloads_root"
+            path="Download/" />
+        <external-path
+            name="documents_root"
+            path="Documents/" />
+    </paths>
+</resources>
