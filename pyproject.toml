@@ -19,7 +19,7 @@ pydantic = { extras = ["email"], version = "^2.4.2" }
 python-multipart = "^0.0.20"
 httpx = "^0.28.1"
 firebase-admin = "^6.8.0"
-google-cloud-aiplatform = "^1.36.4"
+google-cloud-aiplatform = "^1.95.0"
 
 [build-system]
 requires = ["poetry-core"]
